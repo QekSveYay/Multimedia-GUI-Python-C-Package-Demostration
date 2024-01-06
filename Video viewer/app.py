@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from embededMatplotlib import draw_figure, update_figure
+# local user-defined package
 import pb11_operations.operations as ops
 
 frame = [
@@ -19,7 +20,7 @@ layout = [
 
 window = sg.Window('Face Detector', layout, finalize=False)
 
-# get video
+# get camera video
 video = cv2.VideoCapture(0)
 face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
 
@@ -36,9 +37,6 @@ fig_r = plt.Figure(figsize=(4,3))
 fig_r.suptitle('R histogram')
 ax_r = fig_r.add_subplot(111)
 fig_r_agg = draw_figure(window['-R_CANVAS-'].TKCanvas, fig_r)
-
-# create segment image object
-#ops_segim = ops.ImageSegment(1280, 768)
 
 while True:
     event, values = window.read(timeout=0)
@@ -62,7 +60,7 @@ while True:
     r_list = list(r_frame.flatten())
     r_hist = ops.histCalculate(r_list, H, W)
 
-    # Add the plot to the window
+    # update histogram figures
     ax_b.cla()
     ax_g.cla()
     ax_r.cla()

@@ -1,6 +1,7 @@
 import PySimpleGUI as sg
 import cv2
 import numpy as np
+import time
 import matplotlib.pyplot as plt
 from embededMatplotlib import draw_figure, update_figure
 # local user-defined package
@@ -76,7 +77,9 @@ while True:
     # transfer opencv frame(BGR) into 1-D integer list
     int_frame = list(frame.flatten().astype(int))
     # call C++ frame operation module to perform left/right reverse
+    start_time = time.perf_counter_ns()
     reversed_flatten_frame = ops.frameReverse(int_frame, H, W)
+    processTime = (time.perf_counter_ns() - start_time) / 1e9
     # covert result frame into uint8 type
     result_frame = np.array(reversed_flatten_frame, dtype='uint8')
     # transfer back to opencv frame format
@@ -100,7 +103,7 @@ while True:
     window['-IMAGE-'].update(data = imgbytes)
 
     # update the text
-    window['-IMAGE TEXT-'].update(f'Image Info: {H} x {W}')
+    window['-IMAGE TEXT-'].update(f'Image Info: {H} x {W} ; Image Process Time: {processTime} sec')
     window['-PEOPLE TEXT-'].update(f'People in picture:{len(faces)}')
 
 window.close()

@@ -1,10 +1,11 @@
 Video viewer:
 This demostration shows a camera captured video that performed several real-time video operations:
-1. Histogram calculation - .
-2. Frame left/right reverse - .
+1. Histogram calculation - see pb11_operations Python package.
+2. Frame left/right reverse - see pb11_operations Python package.
 3. Face detection - I used Open CV Haar Cascade Classifier[1] to implement real-time face detection. More details can be found in the introduction in [2].
+4. Other advanced image/video processings.
 
-pb11_operaticons:
+pb11_operaticons Python package:
 1. pybind11 C++ package: see setup.py/operations.h/operations.cpp 
 2. hisCalculate function: calculate B/G/R histogram
 3. frameReverse: reverse frame index(right/left)

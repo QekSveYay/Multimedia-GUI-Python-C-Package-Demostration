@@ -10,6 +10,15 @@ pb11_operaticons Python package:
 2. hisCalculate function: calculate B/G/R histogram
 3. frameReverse: reverse frame index(right/left)
 
+Requirement:
+pysimplegui               4.60.5
+pybind11                  2.11.1
+matplotlib                3.8.0
+
+Usage:
+We will complie the C++ package through pybind11, and install this package by default pip system.
+pip install -e . -vvv 
+
 Reference:
 1. Haar Cascade Human Face Classifier - https://github.com/opencv/opencv/tree/4.x/data
 2. 圖形辨識筆記-OPEN CV (haarcascades ) https://vocus.cc/article/636b4479fd89780001a955ac

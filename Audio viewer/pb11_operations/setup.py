@@ -6,7 +6,7 @@ import os
 module = Pybind11Extension('operations',
                            [str(fname) for fname in Path('src').glob('*.cpp')],
                            include_dirs = ['include'],
-                           extra_complie_args = ['-03']
+                           extra_compile_args = ['-O3', '-std=c++17']
                            )
 
 setup(

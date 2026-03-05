@@ -21,7 +21,7 @@
 import os
 import argparse
 import logging
-import pyaudio
+import sounddevice as sd
 import wave
 import numpy as np
 
@@ -52,22 +52,7 @@ class AudioFile:
         self.CH_SIZE = self.wf.getnchannels()
         self.SAMPWIDTH = self.wf.getsampwidth()
 
-        try:
-            self.p = pyaudio.PyAudio()
-            self.stream = self.p.open(
-                format=self.p.get_format_from_width(self.SAMPWIDTH),
-                channels=self.CH_SIZE,
-                rate=self.FS,
-                output=True
-            )
-        except Exception:
-            # Ensure wave file is closed on failure to init audio
-            try:
-                self.wf.close()
-            except Exception:
-                pass
-            logging.exception("Failed to initialize PyAudio stream")
-            raise
+        # sounddevice doesn't need explicit stream initialization
 
     def __enter__(self):
         return self
@@ -76,72 +61,88 @@ class AudioFile:
         self.close()
 
     def play(self):
-        """Play the entire file in chunks with basic processing.
+        """Play the entire file with basic processing.
 
-        This method logs volume and attempts to use the pybind11 operations.
-        Any processing errors fall back to playing the original audio data.
+        This method reads the entire file, processes it, and plays it using sounddevice.
         """
         try:
-            while True:
-                data = self.wf.readframes(self.CHUNK_SIZE)
-                if not data:
-                    break
-
-                # Interpret raw bytes as int16 samples
-                try:
-                    np_indata = np.frombuffer(data, dtype=np.int16)
-                except Exception:
-                    logging.exception("Failed to interpret audio frame as int16")
-                    self.stream.write(data)
-                    continue
-
-                # De-interleave: select first channel (channel 0)
-                channel0 = np_indata[0::self.CH_SIZE]
-
-                # Compute volume (use safe conversion and error handling)
-                try:
-                    vol = ops.volMeter(channel0.tolist(), len(channel0))
-                    logging.info("volume: %s", vol)
-                except Exception:
-                    logging.exception("volMeter failed")
-
-                # Try to process switching channels; if it fails, play original
-                try:
-                    list_indata = np_indata.tolist()
-                    list_outdata = ops.switchCH(list_indata, self.CH_SIZE, self.CHUNK_SIZE)
-                    outdata = np.array(list_outdata, dtype=np.int16).tobytes()
-                except Exception:
-                    logging.exception("switchCH failed; playing original frame")
-                    outdata = data
-
-                try:
-                    self.stream.write(outdata)
-                except Exception:
-                    logging.exception("Stream write failed")
-                    break
-
+            # Read entire file
+            self.wf.rewind()
+            raw_data = self.wf.readframes(self.wf.getnframes())
+            
+            # Convert to numpy array
+            if self.SAMPWIDTH == 2:  # 16-bit
+                dtype = np.int16
+            elif self.SAMPWIDTH == 4:  # 32-bit
+                dtype = np.int32
+            else:
+                dtype = np.int16  # default
+            
+            audio_data = np.frombuffer(raw_data, dtype=dtype)
+            
+            # Reshape to (frames, channels)
+            audio_data = audio_data.reshape(-1, self.CH_SIZE)
+            
+            # Process audio data
+            processed_data = self._process_audio_data(audio_data)
+            
+            # Convert back to proper format for sounddevice
+            if processed_data.dtype != np.float32:
+                # Normalize to float32 in range [-1, 1]
+                if processed_data.dtype == np.int16:
+                    processed_data = processed_data.astype(np.float32) / 32768.0
+                elif processed_data.dtype == np.int32:
+                    processed_data = processed_data.astype(np.float32) / 2147483648.0
+            
+            # Play the audio
+            sd.play(processed_data, samplerate=self.FS, blocking=True)
+            
         except Exception:
             logging.exception("Unexpected error during playback")
             raise
 
+    def _process_audio_data(self, audio_data):
+        """Process audio data with volume metering and channel switching."""
+        processed_data = audio_data.copy()
+        
+        # Process in chunks for volume metering
+        chunk_size = self.CHUNK_SIZE
+        for i in range(0, len(audio_data), chunk_size):
+            chunk = audio_data[i:i+chunk_size]
+            
+            # De-interleave: select first channel (channel 0) for volume
+            if self.CH_SIZE > 1:
+                channel0 = chunk[:, 0]
+            else:
+                channel0 = chunk[:, 0]
+            
+            # Compute volume
+            try:
+                vol = ops.volMeter(channel0.tolist(), len(channel0))
+                logging.info("volume: %s", vol)
+            except Exception:
+                logging.exception("volMeter failed")
+            
+            # Try to process channel switching
+            try:
+                if self.CH_SIZE == 2:  # Stereo
+                    # Switch channels
+                    chunk_list = chunk.tolist()
+                    switched = []
+                    for sample in chunk_list:
+                        switched.append([sample[1], sample[0]])  # swap L/R
+                    processed_data[i:i+len(chunk)] = np.array(switched)
+            except Exception:
+                logging.exception("switchCH failed; using original")
+        
+        return processed_data
+
     def close(self):
         """Graceful shutdown of audio resources."""
         try:
-            if hasattr(self, 'stream') and self.stream is not None:
-                try:
-                    self.stream.stop_stream()
-                except Exception:
-                    pass
-                try:
-                    self.stream.close()
-                except Exception:
-                    pass
-        finally:
-            try:
-                if hasattr(self, 'p') and self.p is not None:
-                    self.p.terminate()
-            except Exception:
-                pass
+            sd.stop()  # Stop any playing audio
+        except Exception:
+            pass
 
         try:
             if hasattr(self, 'wf') and self.wf is not None:

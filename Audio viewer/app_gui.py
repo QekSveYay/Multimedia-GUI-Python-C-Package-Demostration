@@ -122,7 +122,7 @@ class AudioFile:
             # Reshape to (frames, channels)
             audio_data = audio_data.reshape(-1, self.CH_SIZE)
             
-            # Process audio data
+            # Process audio data (for volume metering, etc.)
             processed_data = self._process_audio_data(audio_data)
             
             # Convert back to proper format for sounddevice
@@ -133,14 +133,27 @@ class AudioFile:
                 elif processed_data.dtype == np.int32:
                     processed_data = processed_data.astype(np.float32) / 2147483648.0
             
-            # Play the audio
-            sd.play(processed_data, samplerate=self.FS, blocking=True)
+            # Play the audio in non-blocking mode
+            playback_start_time = time.time()
+            self.current_frame = 0
+            sd.play(processed_data, samplerate=self.FS, blocking=False)
+            
+            # Monitor playback progress based solely on elapsed time and duration
+            while self._get_state() == PlaybackState.PLAYING:
+                elapsed = time.time() - playback_start_time
+                if elapsed >= self.duration_seconds:
+                    # reached end of file
+                    self.current_frame = self.total_frames
+                    break
+                self.current_frame = int(elapsed * self.FS)
+                time.sleep(0.01)  # Update every 10ms
             
         except Exception:
             logging.exception("Unexpected error during playback")
             raise
         finally:
             self._set_state(PlaybackState.IDLE)
+            self.current_frame = self.total_frames
 
     def _process_audio_data(self, audio_data):
         """Process audio data with volume metering and channel switching."""
@@ -223,6 +236,41 @@ class AudioPlayerGUI:
         self.audio_file = None
         self.playback_thread = None
         self.window = None
+        self.waveform = None          # numpy array of normalized samples
+        self.marker = None            # graph object id for current-time line
+        self.graph = None             # reference to Graph element
+
+    def draw_waveform(self, data):
+        """Render the normalized waveform data into the graph element."""
+        if self.graph is None:
+            return
+        self.graph.erase()
+        if data is None or len(data) == 0:
+            logging.warning("draw_waveform: data is empty")
+            return
+        
+        # Downsample waveform to ~1000 points max for performance
+        n = len(data)
+        target_points = 1000
+        if n > target_points:
+            step = n // target_points
+            data_downsampled = data[::step]
+        else:
+            data_downsampled = data
+        
+        logging.debug(f"draw_waveform: {n} samples, {len(data_downsampled)} points after downsampling")
+        
+        n_down = len(data_downsampled)
+        xs = np.linspace(0, 1, n_down)
+        points = []
+        for x, y in zip(xs, data_downsampled):
+            points.append((x, float(y)))
+        
+        logging.debug(f"draw_waveform: drawing {len(points)} points")
+        # draw as polyline using draw_lines (list of points)
+        self.graph.draw_lines(points, color='green')
+        # initial marker at start
+        self.marker = self.graph.draw_line((0, -1), (0, 1), color='red')
 
     def create_window(self):
         """Create the GUI window."""
@@ -234,6 +282,13 @@ class AudioPlayerGUI:
              sg.InputText(key='-FILE-', size=(40, 1)), 
              sg.FileBrowse(file_types=(('WAV Files', '*.wav'), ('All Files', '*.*')))],
             [sg.Text('', size=(60, 1), key='-PATH_DISPLAY-')],
+            [
+                sg.Graph(canvas_size=(500, 200),
+                         graph_bottom_left=(0, -1),
+                         graph_top_right=(1, 1),
+                         background_color='black',
+                         key='-WAVE-')
+            ],
             [sg.ProgressBar(100, orientation='h', size=(50, 20), key='-PROGRESS-')],
             [sg.Text('00:00 / 00:00', key='-TIME-', size=(15, 1))],
             [sg.Text('Volume: 0', key='-VOLUME-', size=(20, 1))],
@@ -244,24 +299,38 @@ class AudioPlayerGUI:
         ]
 
         self.window = sg.Window('Audio Viewer', layout)
+        # keep reference to graph element
+        self.graph = self.window['-WAVE-']
 
     def update_ui(self):
-        """Update UI with current playback info."""
+        """Update UI with current playback info and waveform marker."""
         if self.audio_file is None:
             return
 
         current_sec = self.audio_file.current_frame / self.audio_file.FS
-        progress = (current_sec / self.audio_file.duration_seconds * 100) if self.audio_file.duration_seconds > 0 else 0
+        progress = (current_sec / self.audio_file.duration_seconds) if self.audio_file.duration_seconds > 0 else 0
         
-        self.window['-PROGRESS-'].update(progress)
+        self.window['-PROGRESS-'].update(progress * 100)
         self.window['-TIME-'].update(
             f"{format_time(current_sec)} / {format_time(self.audio_file.duration_seconds)}"
         )
         self.window['-VOLUME-'].update(f"Volume: {self.audio_file.current_volume}")
 
+        # update waveform marker
+        if self.waveform is not None and self.marker is not None:
+            graph = self.window['-WAVE-']
+            try:
+                graph.delete_figure(self.marker)
+            except Exception:
+                # stale id, ignore
+                pass
+            x = progress
+            self.marker = graph.draw_line((x, -1), (x, 1), color='red')
+
     def run(self):
         """Run the GUI event loop."""
         self.create_window()
+        self.graph = self.window['-WAVE-']
 
         while True:
             event, values = self.window.read(timeout=100)
@@ -293,10 +362,39 @@ class AudioPlayerGUI:
                 try:
                     if self.audio_file is not None:
                         self.audio_file.close()
+                        self.audio_file = None
                     
                     self.audio_file = AudioFile(file_path)
                     self.window['-PATH_DISPLAY-'].update(f'Loaded: {os.path.basename(file_path)}')
                     
+                    # prepare waveform
+                    try:
+                        with wave.open(file_path, 'rb') as wf:
+                            frames = wf.readframes(wf.getnframes())
+                            sampwidth = wf.getsampwidth()
+                            ch = wf.getnchannels()
+                        if sampwidth == 2:
+                            dtype = np.int16
+                        elif sampwidth == 4:
+                            dtype = np.int32
+                        else:
+                            dtype = np.int16
+                        audio_arr = np.frombuffer(frames, dtype=dtype)
+                        if ch > 1:
+                            audio_arr = audio_arr.reshape(-1, ch).mean(axis=1)
+                        # normalize to float32
+                        audio_arr = audio_arr.astype(np.float32)
+                        if dtype == np.int16:
+                            audio_arr /= 32768.0
+                        elif dtype == np.int32:
+                            audio_arr /= 2147483648.0
+                        self.waveform = audio_arr
+                        # draw on graph
+                        self.draw_waveform(audio_arr)
+                    except Exception:
+                        logging.exception("Failed to prepare waveform")
+                        self.waveform = None
+
                     # Start playback in a thread
                     self.playback_thread = threading.Thread(target=self.audio_file.play, daemon=True)
                     self.playback_thread.start()
@@ -309,7 +407,7 @@ class AudioPlayerGUI:
             elif event == 'Pause':
                 if self.audio_file is not None:
                     self.audio_file.pause()
-                    sg.PopupInfo('Paused')
+                    sg.popup('Paused')
 
             elif event == 'Stop':
                 if self.audio_file is not None:
@@ -318,10 +416,16 @@ class AudioPlayerGUI:
                         self.playback_thread.join(timeout=1)
                     self.audio_file.close()
                     self.audio_file = None
+                    # reset UI elements
                     self.window['-PROGRESS-'].update(0)
                     self.window['-TIME-'].update('00:00 / 00:00')
                     self.window['-VOLUME-'].update('Volume: 0')
                     self.window['-PATH_DISPLAY-'].update('')
+                    # clear waveform graph and marker
+                    if self.graph is not None:
+                        self.graph.erase()
+                    self.waveform = None
+                    self.marker = None
 
         self.window.close()
         if self.audio_file is not None:
